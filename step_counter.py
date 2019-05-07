@@ -7,19 +7,20 @@ from statistics import mean
 import numpy as np
 
 NANOSECOND_TO_SECOND_FACTOR = 1000000000
+
 lambda_M = 0.017  # Units: g
-
-A_xmin = 0.25  # Units: g
-A_ymin = 0.15  # Units: g
-A_zmin = -0.36  # Units: g
-A_zmax = 0.80  # Units: g
-Acc_max = 2.50  # Units: g
-Acc_min = 1.04  # Units: g
-T_stmax = 1.50  # Units: Seconds
-T_stmin = 0.30  # Units: Seconds
-T = 0.12  # Units: Seconds
-St_min = 6  # Units: Steps
-
+A_xmin = 0.25     # Units: g
+A_ymin = 0.15     # Units: g
+A_zmin = -0.36    # Units: g
+A_zmax = 0.80     # Units: g
+Acc_max = 2.50    # Units: g
+Acc_min = 1.04    # Units: g
+T_stmax = 1.50    # Units: Seconds
+T_stmin = 0.30    # Units: Seconds
+T = 0.12          # Units: Seconds
+St_min = 6        # Units: Steps
+St_RMS = 0.08     # Units: Steps
+Stf_max = 3.00    # Units: Hz
 
 #
 # line segment intersection using vectors
@@ -103,9 +104,7 @@ def compute_threshold(data):
     return [[point[0], max(1.033, data[i - 4 if i - 4 > 0 else i][1])] for i, point in enumerate(data)]
 
 
-
-
-def count_steps(data, lambdaD, axL, ayL, azL):
+def count_steps(data, lambdaD, axL, ayL, azL, RMS):
     steps = 0
     num_peaks = 0
     armed = False
@@ -124,6 +123,8 @@ def count_steps(data, lambdaD, axL, ayL, azL):
 
     crossNegPt = []
     crossPosPt = []
+
+    cadences = []
 
     for i, point in enumerate(data):
         if point[1] > lambdaD[i][1] \
@@ -154,8 +155,9 @@ def count_steps(data, lambdaD, axL, ayL, azL):
             peak = max(step_interval, key=lambda pt: pt[1])
 
             if num_peaks >= St_min:  # Rule 4
-                # Rule 5, 7+8, 9
-                if (len(peaks) == 0 or (len(peaks) > 0 and T_stmin < peak[0] - peaks[len(peaks)-1][0] < T_stmax)) \
+                # Rule 5, 6, 7+8, 9
+                if (len(peaks) == 0 or (len(peaks) > 0 and T_stmin < peak[0] - peaks[len(peaks) - 1][0] < T_stmax)) \
+                        and cadence(peaks[len(peaks)-St_min:]) < Stf_max \
                         and Acc_min <= max(data[pos_cross_index:neg_cross_index], key=lambda pt: pt[1])[1] <= Acc_max \
                         and neg_cross_pt[0] - pos_cross_pt[0] > T:
 
@@ -172,14 +174,43 @@ def count_steps(data, lambdaD, axL, ayL, azL):
 
         elif not armed:
             # Rules 2
-            if lastValidStepIndex is not None and data[i][0] - data[lastValidStepIndex][0] > T_stmax and num_peaks != 0:
+            if lastValidStepIndex is not None \
+                    and data[i][0] - data[lastValidStepIndex][0] > T_stmax \
+                    and num_peaks != 0 and RMS[i] >= St_RMS:
                 num_peaks = 0
                 # Rules 3.2, 3.3, 3.4
             if num_peaks >= St_min and steps > 0 and data[i][0] - data[lastValidStepIndex][0] >= T_stmax:
                 num_peaks = 0
                 steps -= 1
 
-    return steps, peaks, crossPos, crossNeg, crossPosPt, crossNegPt
+    return steps, peaks, crossPos, crossNeg, crossPosPt, crossNegPt, cadences
+
+
+def cadence(steps):
+    if len(steps) < 2:
+        return 0
+    return 1/mean([current[0] - previous[0] for current, previous in zip(steps[1:], steps)])
+
+
+def root_mean_square(data):
+    if len(data) > 0:
+        return sum(map(lambda x: x[1] ** 2, data)) / len(data)
+    return 0
+
+
+def compute_root_mean_square(data, time_window):
+
+    return [(point[0], root_mean_square(data[find_index_s_away(time_window, data[:i+1]): i+1])) for i, point in
+            enumerate(data)]
+
+
+def find_index_s_away(s, data):
+    if (len(data) > 0):
+        t = data[len(data) - 1][0]
+        for i, point in reversed(list(enumerate(data))):
+            if t - point[0] >= s:
+                return i
+    return 0
 
 
 if __name__ == '__main__':
@@ -191,10 +222,6 @@ if __name__ == '__main__':
     a_z = [values["z"] for _, values in accelerometer_data.items()]
 
     a_xL, a_yL, a_zL = compute_moving_average_filter_aL(a_x, a_y, a_z, 16)
-
-    # pprint(a_xL)
-    # pprint(a_yL)
-    # pprint(a_zL)
 
     # plt.plot(a_xL)
     # plt.plot(a_yL)
@@ -210,6 +237,8 @@ if __name__ == '__main__':
 
     AmH = [[pt[0], pt[1] - moving_avg_filter[i][1]] for i, pt in enumerate(AmL)]
 
+    RMS_H = compute_root_mean_square(AmH, 3.00)
+
     threshold = compute_threshold(AmL)
     thresholdavg = compute_threshold(moving_avg_filter)
 
@@ -219,18 +248,21 @@ if __name__ == '__main__':
     # plt.plot(*zip(*Am))
     # plt.plot(*zip(*moving_avg_filter))
     plt.plot(*zip(*threshold), "-.")
+    # plt.plot(*zip(*RMS_H), "-.")
+
+    # plt.plot(*zip(*[[point[0], St_RMS] for point in RMS_H]), "-.")
+
     # plt.plot(*zip(*AmH))
 
-    # pprint(Am)
-    # pprint(AmL)
+    num_step, peaks, crossPos, crossNeg, crossPosPt, crossNegPt, cadences = count_steps(AmL, threshold, a_xL, a_yL, a_zL, RMS_H)
 
-    num_step, peaks, crossPos, crossNeg, crossPosPt, crossNegPt = count_steps(AmL, threshold, a_xL, a_yL, a_zL)
+    plt.plot(*zip(*cadences))
 
     plt.plot(*zip(*peaks), "o")
     plt.plot(*zip(*crossPos), "o")
     plt.plot(*zip(*crossNeg), "o")
-    plt.plot(*zip(*crossNegPt), "o")
-    plt.plot(*zip(*crossPosPt), "o")
+    # plt.plot(*zip(*crossNegPt), "o")
+    # plt.plot(*zip(*crossPosPt), "o")
 
     plt.show()
 
